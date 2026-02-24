@@ -341,46 +341,6 @@ def train_step(p, model_train_func, model, loss_func_tuple,
 
     return batch_print_info_dict, lr
 
-
-def train_step(p, model_train_func, model, loss_func_tuple,
-               optimizer, train_dataset, batch_data,
-               itr, device):
-    model.train()
-    scaler = torch.cuda.amp.GradScaler() # 함수 외부나 클래스에 정의해두는 것이 좋습니다.
-
-    (data_tuple, man, _) = batch_data
-    data_tuple = [data.to(device) for data in data_tuple]
-    man = man.to(device)
-
-    optimizer.zero_grad()
-
-    with torch.cuda.amp.autocast():
-        loss, batch_print_info_dict = model_train_func(
-            p, data_tuple, man, model, train_dataset, loss_func_tuple, device,
-        )
-    
-    scaler.scale(loss).backward()
-    scaler.step(optimizer)
-    scaler.update()
-
-    # LR 스케줄
-    if p.LR_WU and itr <= p.LR_WU_BATCHES:
-        lr = (p.LR * itr) / p.LR_WU_BATCHES / math.sqrt(p.LR_WU_BATCHES)
-    elif p.LR_DECAY == 'inv-sqrt':
-        lr = p.LR / math.sqrt(max(itr, 1))
-    elif p.LR_DECAY == 'none':
-        lr = p.LR
-    else:
-        raise ValueError(f'Unknown LR decay type: {p.LR_DECAY}')
-
-    for g in optimizer.param_groups:
-        g['lr'] = lr
-
-    optimizer.step()
-
-    return batch_print_info_dict, lr
-
-
 def deploy_model(p, model, model_deploy_func, de_loader, de_dataset,
                  device, vis_data_path=None, figure_name=None):
     export_dict = {}
