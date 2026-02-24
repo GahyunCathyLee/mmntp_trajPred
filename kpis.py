@@ -139,14 +139,13 @@ def POVL_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
     traj_max = kpi_input_dict['traj_max'][0]
     traj_min = kpi_input_dict['traj_min'][0]
     
-    #denormalise
     dtraj_pred[:,:,:,:2] = dtraj_pred[:,:,:,:2]*(traj_max-traj_min) + traj_min
     dtraj_pred[:,:,:,2:4] = dtraj_pred[:,:,:,2:4]*(traj_max-traj_min)
     
     dtraj_gt = dtraj_gt*(traj_max-traj_min) + traj_min
-    #from diff to actual
-    traj_pred = np.cumsum(dtraj_pred[:,:,:,:2], axis = 2)
-    traj_gt = np.cumsum(dtraj_gt, axis = 1)
+    
+    traj_pred = dtraj_pred[:,:,:,:2]
+    traj_gt = dtraj_gt
     hp_traj_pred = traj_pred[np.arange(total_samples), hp_mode]
     
     mnlld, mnll = calc_meanNLL(p, dtraj_pred, dtraj_gt, traj_gt, mode_prob)
@@ -186,29 +185,8 @@ def POVL_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
 
 def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
     '''
-    1. NLL (TBD)
-    2. error based 
-    Miss Rate (MR):  The number of scenarios where none of the forecasted trajectories are within 2.0 meters of ground truth according to endpoint error.
-    Minimum Final Displacement Error  (minFDE): The L2 distance between the endpoint of the best forecasted trajectory and the ground truth.  The best here refers to the trajectory that has the minimum endpoint error.
-    Minimum Average Displacement Error  (minADE): The average L2 distance between the best forecasted trajectory and the ground truth.  The best here refers to the trajectory that has the minimum endpoint error.
-    Probabilistic minimum Final Displacement Error  (p-minFDE): This is similar to minFDE. The only difference is we add min(-log(p), -log(0.05)) to the endpoint L2 distance, where p corresponds to the probability of the best forecasted trajectory.
-    Probabilistic minimum Average Displacement Error  (p-minADE): This is similar to minADE. The only difference is we add min(-log(p), -log(0.05)) to the average L2 distance, where p corresponds to the probability of the best forecasted trajectory.
-    3. N accident, N road violation (not here)
-    '''
-    '''
-     batch_kpi_input_dict = {    
-        'data_file': data_file,
-        'tv': tv_id.numpy(),
-        'frames': frames.numpy(),
-        'traj_min': dataset.output_states_min,
-        'traj_max': dataset.output_states_max,  
-        'input_features': feature_data.cpu().data.numpy(),
-        'traj_gt': traj_gt.cpu().data.numpy(),
-        'traj_dist_preds': BM_predicted_data_dist.cpu().data.numpy(),
-        'man_gt': man_gt.cpu().data.numpy(),
-        'man_preds': man_vectors.cpu().data.numpy(),
-        'mode_prob': mode_prob.detach().cpu().data.numpy(),
-    }
+    MMnTP 모델의 KPI (평가지표) 추출 함수
+    추가됨: ADE, FDE, 전체 RMSE, 시간에 따른 RMSE (RMSE_time)
     '''
     time_bar_gt = np.concatenate(kpi_input_dict['time_bar_gt'], axis = 0)
     time_bar_preds = np.concatenate(kpi_input_dict['time_bar_preds'], axis = 0)
@@ -217,6 +195,8 @@ def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
     man_preds = np.concatenate(kpi_input_dict['man_preds'], axis = 0)
     mode_prob = np.concatenate(kpi_input_dict['mode_prob'], axis = 0)
     total_samples = mode_prob.shape[0]
+    
+    # 가장 확률이 높은 모드 (Top-1) 선택
     hp_mode = np.argmax(mode_prob, axis = 1)
     (unique_modes, mode_freq) = np.unique(hp_mode, return_counts = True)
     sorted_args = np.argsort(unique_modes)
@@ -224,30 +204,62 @@ def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
     mode_freq = mode_freq[sorted_args]
     
     dtraj_gt = np.concatenate(kpi_input_dict['traj_gt'], axis = 0)
-    
     dtraj_pred = np.concatenate(kpi_input_dict['traj_dist_preds'], axis = 0)
     
     traj_max = kpi_input_dict['traj_max'][0]
     traj_min = kpi_input_dict['traj_min'][0]
     
-    #denormalise
+    # 정규화 해제 (Denormalization)
     dtraj_pred[:,:,:,:2] = dtraj_pred[:,:,:,:2]*(traj_max-traj_min) + traj_min
     dtraj_pred[:,:,:,2:4] = dtraj_pred[:,:,:,2:4]*(traj_max-traj_min)
     
     dtraj_gt = dtraj_gt*(traj_max-traj_min) + traj_min
-    #from diff to actual
-    traj_pred = np.cumsum(dtraj_pred[:,:,:,:2], axis = 2)
-    traj_gt = np.cumsum(dtraj_gt, axis = 1)
+    
+    traj_pred = dtraj_pred[:,:,:,:2]
+    traj_gt = dtraj_gt
+    
+    # Top-1 모드의 예측 궤적
     hp_traj_pred = traj_pred[np.arange(total_samples), hp_mode]
     
+    # ====================================================================
+    #  ADE, FDE, RMSE @ time
+    # ====================================================================
+    # 1. L2 Distance (각 스텝별 유클리디안 거리)
+    l2_dist = np.linalg.norm(hp_traj_pred - traj_gt, axis=-1)
+    
+    # ADE: 모든 타임스텝에 대한 평균 L2 거리
+    ade_val = np.mean(l2_dist)
+    
+    # FDE: 마지막 타임스텝에 대한 평균 L2 거리
+    fde_val = np.mean(l2_dist[:, -1])
+    
+    # 2. Squared Error (각 스텝별 오차 제곱)
+    sq_dist = np.sum((hp_traj_pred - traj_gt)**2, axis=-1)
+    
+    # 전체 RMSE
+    rmse_val = np.sqrt(np.mean(sq_dist))
+    
+    # 시간에 따른 RMSE (1초, 2초, 3초 ... 등)
+    fps = p.FPS
+    max_sec = int(p.TGT_SEQ_LEN / fps)
+    rmse_time_array = []
+    
+    for t in range(1, max_sec + 1):
+        idx = int(t * fps) - 1 # 0-indexed 이므로 -1
+        if idx < p.TGT_SEQ_LEN:
+            # 특정 시간(t)에서의 순간 RMSE
+            rmse_t = np.sqrt(np.mean(sq_dist[:, idx]))
+            rmse_time_array.append(rmse_t)
+    # ====================================================================
+
     mnlld, mnll = calc_meanNLL(p, dtraj_pred, dtraj_gt, traj_gt, mode_prob)
-    #minFDE = {}
+    
     minRMSE = {}
-    #minMR = {}
     minACC = {}
-    #minTimeACC = {}
     minTimeMAE = {}
-    rmse = {}
+    rmse_k = {}
+    
+    # 기존 Multi-modal K-best 계산 로직
     for K in range(1,min(10,mode_prob.shape[1])+1):
         if K>1 and p.MULTI_MODAL_EVAL == False:
             break
@@ -255,24 +267,16 @@ def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
         kbest_modes = np.argpartition(mode_prob, -1*K, axis = 1)[:,-1*K:]
         index_array = np.repeat(np.arange(total_samples),K).reshape(total_samples, K)
         
-
         kbest_traj_pred = traj_pred[index_array, kbest_modes]
         kbest_modes_probs = mode_prob[index_array, kbest_modes]
         kbest_modes_probs = np.divide(kbest_modes_probs, np.sum(kbest_modes_probs, axis = 1).reshape(total_samples,1)) 
         kbest_man_preds = man_preds[index_array, kbest_modes]
         kbest_time_bar_preds = time_bar_preds[index_array, kbest_modes]
-        #print(kbest_modes_probs)
-        #print(np.sum(kbest_modes_probs, axis = 1))
-        #exit()
+
         minACC[key] = calc_man_acc(p, kbest_man_preds, man_gt)
-        #minTimeACC[key], minTimeACC['min'] = calc_time_acc(p, kbest_time_bar_preds, time_bar_gt)
         minTimeMAE[key], minTimeMAE['random'] = calc_time_mae(p, kbest_time_bar_preds, time_bar_gt)
-        #sm_metrics_df, rmse = calc_sm_metric_df(p, hp_traj_pred, traj_gt)
-    
-        #minFDE[key] = calc_minFDE(p,kbest_traj_pred, kbest_modes_probs, traj_gt)
-        minRMSE[key], rmse[key] = calc_minRMSE(p,kbest_traj_pred, kbest_modes_probs, traj_gt)
+        minRMSE[key], rmse_k[key] = calc_minRMSE(p,kbest_traj_pred, kbest_modes_probs, traj_gt)
         
-    
     return {
         'activated modes group': unique_modes,
         'activated modes percentage group': 100*mode_freq/sum(mode_freq),
@@ -280,13 +284,15 @@ def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
         'time pr histogram': time_bar_preds[:,:,0],
         'time gt histogram': time_bar_gt[:,0],
         'minACC': minACC,
-        #'minTimeACC': minTimeACC,
         'minTimeMAE': minTimeMAE,
-        #'minFDE': minFDE, 
         'minRMSE': minRMSE,
         'mnlld': mnlld,
         'mnll': mnll,
-        'rmse': rmse['K=1'] # minRMSE K=1 max pred horizon
+        
+        'ADE': ade_val,
+        'FDE': fde_val,
+        'RMSE': rmse_val,
+        'RMSE_time': rmse_time_array
     }
 
 
@@ -656,13 +662,14 @@ def log_likelihood_numpy(p,dy_pred, dy_gt, y_gt):
         x = y_gt[:,:, 1]
 
 
-        muY = np.cumsum(mudY, axis = 1)
-        muX = np.cumsum(mudX, axis = 1)
-        sigX = np.sqrt(np.cumsum(np.power(sigdX,2), axis = 1))
-        sigY = np.sqrt(np.cumsum(np.power(sigdY,2), axis = 1))
+        muY = mudY
+        muX = mudX
+        sigX = sigdX
+        sigY = sigdY
+        
         rho_denom = np.multiply(sigX,sigY)
         rho_nom = np.multiply(rhodXY, np.multiply(sigdX, sigdY))
-        rhoXY = np.divide(np.cumsum(rho_nom, axis = 1), rho_denom)
+        rhoXY = np.divide(rho_nom, rho_denom)
         ohrXY = np.power(1-np.power(rhoXY,2),-0.5)
         z = np.power(sigX,-2)*np.power(x-muX,2) + np.power(sigY,-2)*np.power(y-muY,2) - 2*rhoXY*np.power(sigX,-1)*np.power(sigY, -1)*(x-muX)*(y-muY)
         
