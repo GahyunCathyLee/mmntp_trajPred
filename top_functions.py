@@ -344,8 +344,7 @@ def eval_model(p, tb, model_eval_func, model_kpi_func, model, loss_func_tuple,
                         kpi_input_dict[k] = []
                     kpi_input_dict[k].append(batch_kpi_input_dict[k])
 
-                if batch_idx % 10 == 0:
-                    _print_val_batch_progress(batch_idx, n_batches)
+                _print_val_batch_progress(batch_idx, n_batches)
 
     model.train()   
     print()

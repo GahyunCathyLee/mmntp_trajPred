@@ -186,72 +186,64 @@ def POVL_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
 def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
     '''
     MMnTP 모델의 KPI (평가지표) 추출 함수
-    추가됨: ADE, FDE, 전체 RMSE, 시간에 따른 RMSE (RMSE_time)
+    수정 사항: 
+    1. 누적합(cumsum) 제거 (절대 좌표 대응)
+    2. ADE, FDE, RMSE @ time 추가
+    3. Validation 시 경량화 로직 추가 (속도 향상)
     '''
-    time_bar_gt = np.concatenate(kpi_input_dict['time_bar_gt'], axis = 0)
-    time_bar_preds = np.concatenate(kpi_input_dict['time_bar_preds'], axis = 0)
-    
-    man_gt = np.concatenate(kpi_input_dict['man_gt'], axis = 0)
-    man_preds = np.concatenate(kpi_input_dict['man_preds'], axis = 0)
-    mode_prob = np.concatenate(kpi_input_dict['mode_prob'], axis = 0)
+    mode_prob = np.concatenate(kpi_input_dict['mode_prob'], axis=0)
     total_samples = mode_prob.shape[0]
     
-    # 가장 확률이 높은 모드 (Top-1) 선택
-    hp_mode = np.argmax(mode_prob, axis = 1)
-    (unique_modes, mode_freq) = np.unique(hp_mode, return_counts = True)
-    sorted_args = np.argsort(unique_modes)
-    unique_modes = unique_modes[sorted_args]
-    mode_freq = mode_freq[sorted_args]
-    
-    dtraj_gt = np.concatenate(kpi_input_dict['traj_gt'], axis = 0)
-    dtraj_pred = np.concatenate(kpi_input_dict['traj_dist_preds'], axis = 0)
+    dtraj_gt = np.concatenate(kpi_input_dict['traj_gt'], axis=0)
+    dtraj_pred = np.concatenate(kpi_input_dict['traj_dist_preds'], axis=0)
     
     traj_max = kpi_input_dict['traj_max'][0]
     traj_min = kpi_input_dict['traj_min'][0]
     
-    # 정규화 해제 (Denormalization)
-    dtraj_pred[:,:,:,:2] = dtraj_pred[:,:,:,:2]*(traj_max-traj_min) + traj_min
-    dtraj_pred[:,:,:,2:4] = dtraj_pred[:,:,:,2:4]*(traj_max-traj_min)
-    
-    dtraj_gt = dtraj_gt*(traj_max-traj_min) + traj_min
+    dtraj_pred[:,:,:,:2] = dtraj_pred[:,:,:,:2] * (traj_max - traj_min) + traj_min
+    dtraj_gt = dtraj_gt * (traj_max - traj_min) + traj_min
     
     traj_pred = dtraj_pred[:,:,:,:2]
     traj_gt = dtraj_gt
     
-    # Top-1 모드의 예측 궤적
+    hp_mode = np.argmax(mode_prob, axis=1)
     hp_traj_pred = traj_pred[np.arange(total_samples), hp_mode]
     
-    # ====================================================================
-    #  ADE, FDE, RMSE @ time
-    # ====================================================================
-    # 1. L2 Distance (각 스텝별 유클리디안 거리)
     l2_dist = np.linalg.norm(hp_traj_pred - traj_gt, axis=-1)
-    
-    # ADE: 모든 타임스텝에 대한 평균 L2 거리
-    ade_val = np.mean(l2_dist)
-    
-    # FDE: 마지막 타임스텝에 대한 평균 L2 거리
-    fde_val = np.mean(l2_dist[:, -1])
-    
-    # 2. Squared Error (각 스텝별 오차 제곱)
     sq_dist = np.sum((hp_traj_pred - traj_gt)**2, axis=-1)
     
-    # 전체 RMSE
+    ade_val = np.mean(l2_dist)
+    fde_val = np.mean(l2_dist[:, -1])
     rmse_val = np.sqrt(np.mean(sq_dist))
+
+    if figure_name == 'Validation':
+        return {
+            'rmse': rmse_val,      # best.pt 저장 기준
+            'RMSE': rmse_val,
+            'ADE': ade_val,
+            'FDE': fde_val
+        }
     
-    # 시간에 따른 RMSE (1초, 2초, 3초 ... 등)
+    time_bar_gt = np.concatenate(kpi_input_dict['time_bar_gt'], axis=0)
+    time_bar_preds = np.concatenate(kpi_input_dict['time_bar_preds'], axis=0)
+    man_gt = np.concatenate(kpi_input_dict['man_gt'], axis=0)
+    man_preds = np.concatenate(kpi_input_dict['man_preds'], axis=0)
+    
+    (unique_modes, mode_freq) = np.unique(hp_mode, return_counts=True)
+    sorted_args = np.argsort(unique_modes)
+    unique_modes = unique_modes[sorted_args]
+    mode_freq = mode_freq[sorted_args]
+    
+    # 시간에 따른 RMSE (1s ~ 5s)
     fps = p.FPS
     max_sec = int(p.TGT_SEQ_LEN / fps)
     rmse_time_array = []
-    
     for t in range(1, max_sec + 1):
-        idx = int(t * fps) - 1 # 0-indexed 이므로 -1
+        idx = int(t * fps) - 1
         if idx < p.TGT_SEQ_LEN:
-            # 특정 시간(t)에서의 순간 RMSE
-            rmse_t = np.sqrt(np.mean(sq_dist[:, idx]))
-            rmse_time_array.append(rmse_t)
-    # ====================================================================
+            rmse_time_array.append(np.sqrt(np.mean(sq_dist[:, idx])))
 
+    # NLL 계산
     mnlld, mnll = calc_meanNLL(p, dtraj_pred, dtraj_gt, traj_gt, mode_prob)
     
     minRMSE = {}
@@ -259,41 +251,39 @@ def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
     minTimeMAE = {}
     rmse_k = {}
     
-    # 기존 Multi-modal K-best 계산 로직
-    for K in range(1,min(10,mode_prob.shape[1])+1):
-        if K>1 and p.MULTI_MODAL_EVAL == False:
+    # Multi-modal K-best 계산 (K=1 ~ 10)
+    for K in range(1, min(10, mode_prob.shape[1]) + 1):
+        if K > 1 and p.MULTI_MODAL_EVAL == False:
             break
         key = 'K={}'.format(K)
-        kbest_modes = np.argpartition(mode_prob, -1*K, axis = 1)[:,-1*K:]
-        index_array = np.repeat(np.arange(total_samples),K).reshape(total_samples, K)
+        kbest_modes = np.argpartition(mode_prob, -1*K, axis=1)[:, -1*K:]
+        index_array = np.repeat(np.arange(total_samples), K).reshape(total_samples, K)
         
         kbest_traj_pred = traj_pred[index_array, kbest_modes]
         kbest_modes_probs = mode_prob[index_array, kbest_modes]
-        kbest_modes_probs = np.divide(kbest_modes_probs, np.sum(kbest_modes_probs, axis = 1).reshape(total_samples,1)) 
+        kbest_modes_probs = np.divide(kbest_modes_probs, np.sum(kbest_modes_probs, axis=1).reshape(total_samples, 1)) 
         kbest_man_preds = man_preds[index_array, kbest_modes]
         kbest_time_bar_preds = time_bar_preds[index_array, kbest_modes]
 
         minACC[key] = calc_man_acc(p, kbest_man_preds, man_gt)
         minTimeMAE[key], minTimeMAE['random'] = calc_time_mae(p, kbest_time_bar_preds, time_bar_gt)
-        minRMSE[key], rmse_k[key] = calc_minRMSE(p,kbest_traj_pred, kbest_modes_probs, traj_gt)
+        minRMSE[key], rmse_k[key] = calc_minRMSE(p, kbest_traj_pred, kbest_modes_probs, traj_gt)
         
     return {
         'activated modes group': unique_modes,
-        'activated modes percentage group': 100*mode_freq/sum(mode_freq),
-        'high prob mode histogram':hp_mode,
-        'time pr histogram': time_bar_preds[:,:,0],
-        'time gt histogram': time_bar_gt[:,0],
+        'activated modes percentage group': 100 * mode_freq / sum(mode_freq),
+        'high prob mode histogram': hp_mode,
+        'time pr histogram': time_bar_preds[:, :, 0],
+        'time gt histogram': time_bar_gt[:, 0],
         'minACC': minACC,
         'minTimeMAE': minTimeMAE,
         'minRMSE': minRMSE,
         'mnlld': mnlld,
         'mnll': mnll,
-        
         'ADE': ade_val,
         'FDE': fde_val,
         'RMSE': rmse_val,
         'RMSE_time': rmse_time_array,
-
         'rmse': rmse_val
     }
 
