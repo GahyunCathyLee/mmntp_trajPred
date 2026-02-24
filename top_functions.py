@@ -79,8 +79,9 @@ def _print_val_summary(val_print_dict, val_kpi_dict, best_itr, best_val_score, v
       [KPI    ] kpi_dict scalar 값들
       [Best   ] best itr / score / val_time
     """
+    # RMSE_time은 리스트이므로 요약 출력에서 제외합니다.
     _SKIP = ('histogram', 'list', 'group', 'Best ITR', 'Best Val Score',
-             'Validation Time', 'Itr')
+             'Validation Time', 'Itr', 'RMSE_time') 
 
     # ── Loss 계열 / Partial 계열 분리 ────────────────────────────────
     loss_items    = {}
@@ -103,11 +104,18 @@ def _print_val_summary(val_print_dict, val_kpi_dict, best_itr, best_val_score, v
         print("[Partial] " + "  ".join(f"{k}: {v:.4f}" for k, v in partial_items.items()))
 
     # ── KPI 블록 ─────────────────────────────────────────────────────
-    kpi_items = {
-        k: val_kpi_dict[k] for k in val_kpi_dict
-        if all(x not in k for x in ('histogram', 'list', 'group', 'min', 'max', 'mnll', 'rmse_table'))
-        and not isinstance(val_kpi_dict[k], np.ndarray)
-    }
+    # 리스트나 넘파이 배열인 경우 필터링하여 에러를 방지합니다.
+    kpi_items = {}
+    for k, v in val_kpi_dict.items():
+        if any(x in k for x in ('histogram', 'list', 'group', 'min', 'max', 'mnll', 'rmse_table', 'RMSE_time')):
+            continue
+        if isinstance(v, (list, np.ndarray)):
+            continue
+        try:
+            kpi_items[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+
     if kpi_items:
         print("[KPI    ] " + "  ".join(f"{k}: {v:.4f}" for k, v in kpi_items.items()))
 
@@ -198,7 +206,6 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
                    prev_best_model=None, prev_itr=1, tensorboard=None,
                    log_callbacks=None):
 
-    # 1. AMP 스케일러 생성
     scaler = torch.amp.GradScaler('cuda') 
 
     tr_loader = utils_data.DataLoader(
@@ -207,9 +214,12 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
         num_workers=16, pin_memory=True,
         persistent_workers=True, prefetch_factor=4,  
     )
+    
+    # 🚀 최적화 1: Validation 배치 사이즈를 4배(또는 그 이상)로 키움
+    val_batch_size = p.BATCH_SIZE * 4 
     val_loader = utils_data.DataLoader(
         dataset=val_dataset, shuffle=True,
-        batch_size=p.BATCH_SIZE, drop_last=True,
+        batch_size=val_batch_size, drop_last=True,
         num_workers=16, pin_memory=True,             
         persistent_workers=True, prefetch_factor=4, 
     )
@@ -230,14 +240,12 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
 
     for itr in range(prev_itr, p.NUM_ITRS):
         itr_start = time()
-
         try:
             batch_data = next(tr_iterator)
         except StopIteration:
             tr_iterator = iter(tr_loader)
             batch_data = next(tr_iterator)
 
-        # 2. train_step 호출 (여기서 10번째 인자인 scaler를 전달합니다)
         tr_print_dict, lr = train_step(
             p, model_train_func, model,
             loss_func_tuple, optimizer,
@@ -245,8 +253,6 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
         )
 
         itr_time = time() - itr_start
-
-        # 100 itr 누적 로직
         for k, v in tr_print_dict.items():
             if 'histogram' not in k:
                 window_loss_sum[k] = window_loss_sum.get(k, 0.0) + v
@@ -261,13 +267,6 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
             window_loss_sum = {}
             window_time_sum = 0.0
 
-            if tensorboard is not None:
-                tensorboard.add_scalar('LR', lr, itr)
-                for k, v in tr_print_dict.items():
-                    if 'histogram' not in k:
-                        tensorboard.add_scalar('Train_itr_' + k, v, itr)
-
-        # Validation 루프
         if itr % p.VAL_FREQ == 0 or p.DEBUG_MODE:
             val_start = time()
             val_print_dict, val_kpi_dict = eval_model(
@@ -280,7 +279,6 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
             )
             val_elapsed = time() - val_start
 
-            # 지표 추출 (KeyError 방지)
             val_score = None
             possible_keys = [p.VAL_SCORE, p.VAL_SCORE.lower(), p.VAL_SCORE.upper()]
             for pk in possible_keys:
@@ -307,13 +305,65 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
 
     return {'Best Itr': best_itr, 'Best Validation Loss': best_val_score}
 
+
+def eval_model(p, tb, model_eval_func, model_kpi_func, model, loss_func_tuple,
+               test_loader, test_dataset, epoch, device,
+               eval_type='Validation', vis_data_path=None, figure_name=None):
+
+    print_dict     = {}
+    kpi_input_dict = {}
+    
+    # 🚀 최적화 2: n_batches 계산 시 실제 돌아가는 batch 수에 맞게 조정
+    n_batches = len(test_loader) if eval_type != 'Validation' else min(len(test_loader), p.MAX_VAL_ITR)
+
+    model.eval()
+
+    with torch.no_grad():
+        # 🚀 최적화 3: Validation에도 AMP(autocast) 적용
+        with torch.amp.autocast('cuda'):
+            for batch_idx, (data_tuple, man, plot_info) in enumerate(test_loader):
+                if eval_type == 'Validation' and batch_idx >= p.MAX_VAL_ITR:
+                    break
+                if p.DEBUG_MODE and batch_idx > 2:
+                    break
+
+                data_tuple = [data.to(device, non_blocking=True) for data in data_tuple]
+                man = man.to(device, non_blocking=True)
+
+                batch_print_info_dict, batch_kpi_input_dict = model_eval_func(
+                    p, data_tuple, man, plot_info,
+                    test_dataset, model, loss_func_tuple, device, eval_type,
+                )
+
+                for k in batch_print_info_dict:
+                    if 'histogram' not in k:
+                        print_dict[k] = print_dict.get(k, 0.0) + batch_print_info_dict[k] / n_batches
+
+                for k in batch_kpi_input_dict:
+                    if k not in kpi_input_dict:
+                        kpi_input_dict[k] = []
+                    kpi_input_dict[k].append(batch_kpi_input_dict[k])
+
+                if batch_idx % 10 == 0:
+                    _print_val_batch_progress(batch_idx, n_batches)
+
+    model.train()   
+    print()
+
+    kpi_dict = model_kpi_func(
+        p, kpi_input_dict,
+        test_dataset.output_states_min, test_dataset.output_states_max,
+        figure_name,
+    )
+
+    return print_dict, kpi_dict
+
 def train_step(p, model_train_func, model, loss_func_tuple,
                optimizer, train_dataset, batch_data,
-               itr, device, scaler): # <--- 10번째 인자 확인
+               itr, device, scaler):
     model.train()
 
     (data_tuple, man, _) = batch_data
-    # GPU 전송 시 non_blocking=True 적용
     data_tuple = [data.to(device, non_blocking=True) for data in data_tuple]
     man = man.to(device, non_blocking=True)
 
@@ -369,56 +419,3 @@ def deploy_model(p, model, model_deploy_func, de_loader, de_dataset,
 
     print()
     return export_dict
-
-
-def eval_model(p, tb, model_eval_func, model_kpi_func, model, loss_func_tuple,
-               test_loader, test_dataset, epoch, device,
-               eval_type='Validation', vis_data_path=None, figure_name=None):
-
-    print_dict     = {}
-    kpi_input_dict = {}
-    n_batches = len(test_loader) if eval_type != 'Validation' else p.MAX_VAL_ITR
-
-    model.eval()
-
-    with torch.no_grad():
-        for batch_idx, (data_tuple, man, plot_info) in enumerate(test_loader):
-            if eval_type == 'Validation' and batch_idx >= p.MAX_VAL_ITR:
-                break
-            if p.DEBUG_MODE and batch_idx > 2:
-                break
-
-            data_tuple = [data.to(device, non_blocking=True) for data in data_tuple]
-            man = man.to(device, non_blocking=True)
-
-            batch_print_info_dict, batch_kpi_input_dict = model_eval_func(
-                p, data_tuple, man, plot_info,
-                test_dataset, model, loss_func_tuple, device, eval_type,
-            )
-
-            for k in batch_print_info_dict:
-                if 'histogram' not in k:
-                    print_dict[k] = print_dict.get(k, 0.0) + batch_print_info_dict[k] / n_batches
-
-            for k in batch_kpi_input_dict:
-                if k not in kpi_input_dict:
-                    kpi_input_dict[k] = []
-                kpi_input_dict[k].append(batch_kpi_input_dict[k])
-
-            if batch_idx % 10 == 0:
-                _print_val_batch_progress(batch_idx, n_batches)
-
-    model.train()   
-    print()
-
-    kpi_dict = model_kpi_func(
-        p, kpi_input_dict,
-        test_dataset.output_states_min, test_dataset.output_states_max,
-        figure_name,
-    )
-
-    if eval_type == 'Test':
-        with open(vis_data_path, 'wb') as fp:
-            pickle.dump(kpi_input_dict, fp)
-
-    return print_dict, kpi_dict
