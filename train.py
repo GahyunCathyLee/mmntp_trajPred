@@ -15,6 +15,23 @@ import top_functions
 from evaluate import test_model_dict
 import TPMs
 
+def print_model_size(model):
+    param_size = 0
+    param_count = 0
+    for param in model.parameters():
+        param_count += param.nelement()
+        param_size += param.nelement() * param.element_size()
+    
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_all_mb = (param_size + buffer_size) / 1024**2
+    print(f"\n" + "="*50)
+    print(f"📊 Model Size Info")
+    print(f"  • Total Parameters : {param_count:,}")
+    print(f"  • Model Memory Size: {size_all_mb:.2f} MB")
+    print("="*50 + "\n")
 
 def train_model_dict(p, prev_best_model=None, prev_itr=1):
 
@@ -49,7 +66,10 @@ def train_model_dict(p, prev_best_model=None, prev_itr=1):
         print("🔒  Transfer learning: only FC layer is trainable.")
 
     model = model.to(device)
-    #model = torch.compile(model)
+
+    print_model_size(model)
+    
+    model = torch.compile(model)
     optimizer = p.model_dictionary['optimizer'](params=model.parameters(), lr=p.LR)
 
     if p.model_dictionary['hyperparams']['probabilistic output']:

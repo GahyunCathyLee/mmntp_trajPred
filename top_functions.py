@@ -347,18 +347,22 @@ def train_step(p, model_train_func, model, loss_func_tuple,
                optimizer, train_dataset, batch_data,
                itr, device):
     model.train()
+    scaler = torch.cuda.amp.GradScaler() # 함수 외부나 클래스에 정의해두는 것이 좋습니다.
 
     (data_tuple, man, _) = batch_data
-
     data_tuple = [data.to(device) for data in data_tuple]
     man = man.to(device)
 
     optimizer.zero_grad()
 
-    loss, batch_print_info_dict = model_train_func(
-        p, data_tuple, man, model, train_dataset, loss_func_tuple, device,
-    )
-    loss.backward()
+    with torch.cuda.amp.autocast():
+        loss, batch_print_info_dict = model_train_func(
+            p, data_tuple, man, model, train_dataset, loss_func_tuple, device,
+        )
+    
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
 
     # LR 스케줄
     if p.LR_WU and itr <= p.LR_WU_BATCHES:
