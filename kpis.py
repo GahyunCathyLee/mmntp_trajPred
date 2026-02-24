@@ -292,7 +292,9 @@ def MMnTP_kpis(p, kpi_input_dict, traj_min, traj_max, figure_name):
         'ADE': ade_val,
         'FDE': fde_val,
         'RMSE': rmse_val,
-        'RMSE_time': rmse_time_array
+        'RMSE_time': rmse_time_array,
+
+        'rmse': rmse_val
     }
 
 

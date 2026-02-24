@@ -198,6 +198,8 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
                    prev_best_model=None, prev_itr=1, tensorboard=None,
                    log_callbacks=None):
 
+    scaler = torch.amp.GradScaler('cuda') 
+
     tr_loader = utils_data.DataLoader(
         dataset=tr_dataset, shuffle=True,
         batch_size=p.BATCH_SIZE, drop_last=True,
@@ -219,9 +221,8 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
     best_itr = 0
     p.LR_WU_CURRENT_BATCH = 0
 
-    window_loss_sum  = {}   
+    window_loss_sum  = {}    
     window_time_sum  = 0.0
-    window_start     = time()
     training_start   = time()
 
     tr_iterator = iter(tr_loader)
@@ -235,45 +236,40 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
             tr_iterator = iter(tr_loader)
             batch_data = next(tr_iterator)
 
-        # 4. train_step 호출 (tr_loader 대신 batch_data 전달)
+        # train_step 호출 (scaler 전달)
         tr_print_dict, lr = train_step(
             p, model_train_func, model,
             loss_func_tuple, optimizer,
-            tr_dataset, batch_data, itr, device,
+            tr_dataset, batch_data, itr, device, scaler
         )
 
         itr_time = time() - itr_start
 
-        # ── 100 itr 누적 ─────────────────────────────────────────────
+        # 100 itr 누적용
         for k, v in tr_print_dict.items():
             if 'histogram' not in k:
                 window_loss_sum[k] = window_loss_sum.get(k, 0.0) + v
         window_time_sum += itr_time
 
-        # ── 100 itr마다 한 줄 출력 (\r) ──────────────────────────────
+        # 진행 상황 출력
         if itr % 100 == 99:
             avg_metrics = {k: window_loss_sum[k] / 100 for k in window_loss_sum}
             elapsed = time() - training_start
             avg_itr_time = window_time_sum / 100
             eta = avg_itr_time * (p.NUM_ITRS - itr)
             _print_train_progress(itr + 1, p.NUM_ITRS, avg_metrics, lr, elapsed, eta)
-            # 초기화
             window_loss_sum = {}
             window_time_sum = 0.0
 
-        # ── TensorBoard (train) ───────────────────────────────────────
-        ''''''
-        if itr % 100 == 99:
-            tensorboard.add_scalar('LR', lr, itr)
-            for k in tr_print_dict:
-                if 'histogram' in k:
-                    tensorboard.add_histogram('Train_itr_' + k, tr_print_dict[k], itr)
-                else:
-                    tensorboard.add_scalar('Train_itr_' + k, tr_print_dict[k], itr)
-        ''''''
-        # ── Validation ───────────────────────────────────────────────
-        if itr % p.VAL_FREQ == 0 or p.DEBUG_MODE:
+            # TensorBoard 기록
+            if tensorboard is not None:
+                tensorboard.add_scalar('LR', lr, itr)
+                for k, v in tr_print_dict.items():
+                    if 'histogram' not in k:
+                        tensorboard.add_scalar('Train_itr_' + k, v, itr)
 
+        # Validation 실행
+        if itr % p.VAL_FREQ == 0 or p.DEBUG_MODE:
             val_start = time()
             val_print_dict, val_kpi_dict = eval_model(
                 p, tensorboard,
@@ -285,62 +281,81 @@ def train_top_func(p, model_train_func, model_eval_func, model_kpi_func,
             )
             val_elapsed = time() - val_start
 
-            # val score 추출
-            val_score = (val_print_dict[p.VAL_SCORE]
-                         if p.VAL_SCORE in val_print_dict
-                         else val_kpi_dict[p.VAL_SCORE])
+            # KeyError 방지: p.VAL_SCORE('rmse')가 어디에 있든 안전하게 추출
+            val_score = None
+            possible_keys = [p.VAL_SCORE, p.VAL_SCORE.lower(), p.VAL_SCORE.upper()]
+            
+            for pk in possible_keys:
+                if pk in val_print_dict:
+                    val_score = val_print_dict[pk]
+                    break
+                if pk in val_kpi_dict:
+                    val_score = val_kpi_dict[pk]
+                    break
+            
+            if val_score is None:
+                val_score = 999.0 # 찾지 못할 경우 대비
 
-            # best 갱신
+            # Best 모델 갱신 및 저장
             is_best = (p.LOWER_BETTER_VAL_SCORE and val_score < best_val_score) \
                    or (not p.LOWER_BETTER_VAL_SCORE and val_score > best_val_score)
+            
             if is_best:
                 best_val_score = val_score
                 best_itr = itr
                 torch.save(model.state_dict(), best_model_path)
                 _print_best_ckpt(itr, best_val_score, best_model_path)
 
-            val_print_dict['Validation Time']                       = val_elapsed
-            val_print_dict['Best ITR']                              = best_itr
-            val_print_dict[f'Best Val Score ({p.VAL_SCORE})']       = best_val_score
+            val_print_dict['Validation Time'] = val_elapsed
+            val_print_dict['Best ITR'] = best_itr
+            val_print_dict[f'Best Val Score ({p.VAL_SCORE})'] = best_val_score
 
             _print_val_summary(val_print_dict, val_kpi_dict, best_itr,
                                 best_val_score, p.VAL_SCORE)
 
-            total_elapsed = time() - training_start
-            h, rem = divmod(int(total_elapsed), 3600)
-            m, s   = divmod(rem, 60)
-            print()
-            '''
-            # TensorBoard (val)
-            for k in val_print_dict:
-                try:
-                    tensorboard.add_scalar('Validation_itr_' + k, val_print_dict[k], itr)
-                except Exception:
-                    pass
-            for k in val_kpi_dict:
-                if 'histogram' in k:
-                    tensorboard.add_histogram('Validation_' + k, val_kpi_dict[k], itr)
-                elif 'rmse_table' in k:
-                    for i in range(p.MAX_IN_SEQ_LEN):
-                        tensorboard.add_scalar('Validation_' + k + str(i), val_kpi_dict[k][0, i], itr)
-                elif all(x not in k for x in ('group', 'min', 'max', 'mnll', 'list')):
-                    try:
-                        tensorboard.add_scalar('Validation_' + k, val_kpi_dict[k], itr)
-                    except Exception:
-                        pass
-            '''
             if p.DEBUG_MODE:
-                print("\n[DEBUG] Debug mode — stopping after first validation.")
                 break
 
-    print(f"\n{'='*65}")
-    print(f"  Training complete.  Best itr: {best_itr}  |  Best score: {best_val_score:.4f}")
-    print(f"{'='*65}\n")
+    return {'Best Itr': best_itr, 'Best Validation Loss': best_val_score}
 
-    return {
-        'Best Itr': best_itr,
-        'Best Validation Loss': best_val_score,
-    }
+
+def train_step(p, model_train_func, model, loss_func_tuple,
+               optimizer, train_dataset, batch_data,
+               itr, device, scaler):
+    model.train()
+
+    (data_tuple, man, _) = batch_data
+    # non_blocking=True로 GPU 전송 가속
+    data_tuple = [data.to(device, non_blocking=True) for data in data_tuple]
+    man = man.to(device, non_blocking=True)
+
+    optimizer.zero_grad()
+
+    # AMP 적용 (최신 문법)
+    with torch.amp.autocast('cuda'):
+        loss, batch_print_info_dict = model_train_func(
+            p, data_tuple, man, model, train_dataset, loss_func_tuple, device,
+        )
+    
+    scaler.scale(loss).backward()
+
+    # LR 스케줄링
+    if p.LR_WU and itr <= p.LR_WU_BATCHES:
+        lr = (p.LR * itr) / p.LR_WU_BATCHES / math.sqrt(p.LR_WU_BATCHES)
+    elif p.LR_DECAY == 'inv-sqrt':
+        lr = p.LR / math.sqrt(max(itr, 1))
+    elif p.LR_DECAY == 'none':
+        lr = p.LR
+    else:
+        lr = p.LR
+
+    for g in optimizer.param_groups:
+        g['lr'] = lr
+
+    scaler.step(optimizer)
+    scaler.update()
+
+    return batch_print_info_dict, lr
 
 
 def train_step(p, model_train_func, model, loss_func_tuple,
