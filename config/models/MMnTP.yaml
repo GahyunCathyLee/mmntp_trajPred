@@ -1,0 +1,21 @@
+name: MMnTP #Multi-Modal Manouvre and Trajectory Prediction
+ref: TPMs.MMnTP.model.MMnTP
+hyperparams:
+  layer number: 1
+  model dim: 512
+  feedforward dim: 128
+  classifier dim: 256
+  head number: 8
+  probabilistic output: True
+  number of modes: 3
+  manouvre per mode: 3 # = number of change period+1
+  time prediction: 'regression'
+optimizer: torch.optim.Adam
+man loss function: TPMs.MMnTP.functions.MTPM_loss
+traj loss function: torch.nn.MSELoss
+model training function: TPMs.MMnTP.functions.MMnTP_training
+model evaluation function: TPMs.MMnTP.functions.MMnTP_evaluation
+model deploy function: TPMs.MMnTP.functions.MMnTP_deploy
+model kpi function: kpis.MMnTP_kpis
+data type: 'state'
+state type: 'kine'

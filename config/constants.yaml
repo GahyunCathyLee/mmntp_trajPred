@@ -1,0 +1,18 @@
+MODELS:
+  FEATURE_SIZE: 24
+  MAP_FEATURES: 2
+TASKS:
+  CLASSIFICATION: 0
+  REGRESSION: 1
+  DUAL: 2 
+  TRAJECTORYPRED: 3
+
+DIRS:
+  MODELS_DIR: 'models/'
+  WEIGHTS_DIR: 'ckpts/baseline/'
+  RESULTS_DIR: 'results/'
+  VISUALISE_DIR: 'results/visualisation'
+  TABLES_DIR: 'results/tables/'
+  FIGS_DIR: 'results/figures/'
+  VIS_DIR: 'results/vis_data/'        
+  UNBALANCED_EXT: 'U' 

@@ -1,0 +1,14 @@
+name: CONSTANT_PARAMETER
+ref: TPMs.ConstantX.model.ConstantX
+hyperparams:
+  parameter: Final Velocity # Final Velocity, Mean Velocity
+  probabilistic output: False 
+optimizer: torch.optim.Adam #not used
+traj loss function: torch.nn.MSELoss #not used
+man loss function: TPMs.POVL.functions.MTPM_loss #not used
+model training function: TPMs.ConstantX.functions.CONSTANTX_training #not used
+model evaluation function: TPMs.ConstantX.functions.CONSTANTX_evaluation 
+model deploy function: TPMs.ConstantX.functions.CONSTANTX_deploy
+model kpi function: TPMs.ConstantX.kpis.ConstantX_kpis
+data type: 'state'
+state type: 'constantx_data' 
